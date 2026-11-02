@@ -343,7 +343,7 @@ function Run-Show([string]$kind) {
     if ($kind -eq 'quote') { $Bubble.Visibility = 'Visible'; Next-Quote } else { $Bubble.Visibility = 'Collapsed' }
     Slide-In {
         switch ($script:pendingKind) {
-            'peek'   { $anim.Start(); Hold 2500 { $anim.Stop(); $script:fi = 0; $Pope.Source = $frames[0]; Finish-Show } }
+            'peek'   { Hold 2500 { Finish-Show } }   # bez animacji: wyjedź, poczekaj, zjedź
             'quote'  { $script:awaitingHide = $true; Organ-AndSpeak;  Hold 25000 { Finish-Show } }
             'report' { $script:awaitingHide = $true; Speak-SysStatus; Hold 25000 { Finish-Show } }
         }

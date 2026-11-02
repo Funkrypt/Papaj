@@ -1,24 +1,38 @@
 # Papaj
 
 Animowany gadżet na pulpit Windows z Janem Pawłem II (PowerShell + WPF).
+Działa w tle i co jakiś czas pokazuje się na pulpicie.
 
-## Funkcje
-- Dymek z losowym cytatem (ponad 100 pozycji w `papaj_cytaty.txt`).
-- Kliknięcie lewym = następny cytat + organy + lektor (głos „Paulina", TTS).
-- Menu pod prawym przyciskiem: czytaj / następny / zatrzymaj / raport / zamknij.
-- **Co 30 minut** głosowy, humorystyczny raport o zużyciu RAM i CPU.
-- Animacja GIF odtwarzana **tylko wtedy, gdy papież mówi**.
-- Okno trzymane w prawym dolnym rogu pulpitu, zawsze na wierzchu.
+## Instalacja (jedna linijka)
+
+W **PowerShell** wklej i uruchom:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Funkrypt/Papaj/main/install.ps1 | iex"
+```
+
+Instalator pobiera projekt do `%LOCALAPPDATA%\Papaj`, dodaje autostart i od razu uruchamia gadżet.
+Nie wymaga gita. Plik `organy.wav` generuje się sam przy pierwszym starcie.
+
+## Zachowanie
+- Domyślnie **ukryty**, działa w tle.
+- **Co 10 minut**: krótki „peek" — wysuwa się z dołu na ~2,5 s (bez dźwięku) i chowa.
+- **Co 30 minut, na zmianę**:
+  - **cytat** — wysuwa się z dymkiem, gra organy, lektor czyta cytat, po czym się chowa;
+  - **raport RAM/CPU** — wysuwa się i humorystycznie czyta aktualne zużycie zasobów.
+- Głos dobierany automatycznie: Microsoft Paulina → dowolny polski → pierwszy dostępny
+  (działa też na komputerze bez polskiego pakietu językowego).
+- Klik na widocznego papieża = schowaj; prawy przycisk (gdy widoczny) = menu.
 
 ## Pliki
 - `Papaj.ps1` — główny skrypt gadżetu.
 - `papaj.gif` — animacja postaci.
 - `papaj_cytaty.txt` — baza cytatów (format: `treść|źródło`).
-- `start.vbs` — uruchamia gadżet bez okna konsoli (skrót w folderze Autostart).
+- `start.vbs` — uruchamia gadżet bez okna konsoli (przenośny, z własnego folderu).
+- `install.ps1` — instalator (pobranie + autostart + uruchomienie).
 
 ## Pliki generowane (poza repo)
-- `organy.wav` — syntezowany programowo przy pierwszym starcie, więc nie trzeba
-  go dystrybuować; na nowym komputerze skrypt odtworzy go sam.
+- `organy.wav` — syntezowany programowo przy pierwszym starcie.
 
 ## Wymagania
 Windows 10/11, PowerShell 5+, głos TTS „Microsoft Paulina Desktop" (opcjonalnie).
