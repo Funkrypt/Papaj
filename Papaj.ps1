@@ -1,7 +1,7 @@
 ﻿param([string]$Snapshot)
 # Gadżet na pulpit: animowany GIF Jana Pawła II + dymek z jego cytatami.
 # Klik lewym = następny cytat, prawy = menu (przeczytaj / następny / zamknij).
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Drawing, System.Speech
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Drawing, System.Runtime.WindowsRuntime
 
 $Dir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Gif  = Join-Path $Dir 'papaj.gif'
@@ -171,42 +171,54 @@ function Next-Quote {
     $script:qi = $j; $script:since = 0; Show-Quote $j
 }
 
-# --- mowa (ten sam głos co w gadżecie Tychy) ---
-# papież rusza się TYLKO gdy mówi: start mowy -> animacja, koniec -> bezruch (klatka 0)
-$script:syn = $null
-$script:hasVoice = $false
-# Dobór głosu odporny na brak polskiego: Paulina -> dowolny polski -> pierwszy dostępny
-function Select-BestVoice($syn) {
+# --- mowa: OneCore TTS (widzi nowoczesne głosy, w tym polskie), odtwarzanie przez MediaPlayer ---
+# papież rusza się TYLKO gdy mówi: MediaOpened -> animacja, MediaEnded -> bezruch + ewentualne schowanie
+$null = [Windows.Media.SpeechSynthesis.SpeechSynthesizer, Windows.Media, ContentType = WindowsRuntime]
+$null = [Windows.Media.SpeechSynthesis.SpeechSynthesisStream, Windows.Media, ContentType = WindowsRuntime]
+$script:asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
+        $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+    })[0]
+function Await-WinRT($op, $t) { $task = $script:asTask.MakeGenericMethod($t).Invoke($null, @($op)); [void]$task.Wait(-1); $task.Result }
+
+$script:ttsSynth = $null
+$script:ttsWav = Join-Path $env:TEMP 'papaj_tts.wav'
+function Init-Tts {
+    if ($script:ttsSynth) { return }
     try {
-        $voices = @($syn.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object { $_.VoiceInfo })
-        if ($voices.Count -eq 0) { return $false }
-        $pick = $voices | Where-Object { $_.Name -eq 'Microsoft Paulina Desktop' } | Select-Object -First 1
-        if (-not $pick) { $pick = $voices | Where-Object { $_.Name -match 'Paulina' } | Select-Object -First 1 }
-        if (-not $pick) { $pick = $voices | Where-Object { $_.Culture -and $_.Culture.TwoLetterISOLanguageName -eq 'pl' } | Select-Object -First 1 }
-        if (-not $pick) { $pick = $voices[0] }
-        $syn.SelectVoice($pick.Name)
+        $script:ttsSynth = [Windows.Media.SpeechSynthesis.SpeechSynthesizer]::new()
+        # polski głos, gdy jest (Paulina/Adam); inaczej głos domyślny systemu (fallback)
+        $pl = [Windows.Media.SpeechSynthesis.SpeechSynthesizer]::AllVoices | Where-Object { $_.Language -like 'pl*' } | Select-Object -First 1
+        if ($pl) { $script:ttsSynth.Voice = $pl }
+    } catch { $script:ttsSynth = $null }
+}
+$script:ttsPlayer = New-Object Windows.Media.MediaPlayer
+$script:ttsPlayer.add_MediaOpened({ $anim.Start(); $script:ttsPlayer.Play() })
+$script:ttsPlayer.add_MediaEnded({
+    $anim.Stop(); $script:fi = 0; $Pope.Source = $frames[0]
+    try { $script:ttsPlayer.Close() } catch { }
+    if ($script:awaitingHide) { $script:awaitingHide = $false; Hold 900 { Finish-Show } }
+})
+$script:ttsPlayer.add_MediaFailed({
+    $anim.Stop(); $script:fi = 0; $Pope.Source = $frames[0]
+    if ($script:awaitingHide) { $script:awaitingHide = $false; Hold 300 { Finish-Show } }
+})
+function Speak-Text([string]$text) {
+    Init-Tts
+    if (-not $script:ttsSynth) { return $false }
+    try {
+        try { $script:ttsPlayer.Stop(); $script:ttsPlayer.Close() } catch { }
+        $stream = Await-WinRT ($script:ttsSynth.SynthesizeTextToStreamAsync($text)) ([Windows.Media.SpeechSynthesis.SpeechSynthesisStream])
+        $net = [System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($stream)
+        $fs = [IO.File]::Create($script:ttsWav)
+        $net.CopyTo($fs); $fs.Close(); $net.Dispose()
+        $script:ttsPlayer.Open([Uri]$script:ttsWav)   # MediaOpened -> animacja + Play
         return $true
     } catch { return $false }
 }
-function Init-Syn {
-    if ($script:syn) { return }
-    $script:syn = New-Object System.Speech.Synthesis.SpeechSynthesizer
-    $script:hasVoice = Select-BestVoice $script:syn
-    try { $script:syn.Rate = -1 } catch { }
-    $script:syn.add_SpeakStarted({ $win.Dispatcher.Invoke([action] { $anim.Start() }) })
-    $script:syn.add_SpeakCompleted({
-        param($s, $e)
-        $c = $false; try { $c = [bool]$e.Cancelled } catch { }
-        $script:lastCancelled = $c
-        $win.Dispatcher.Invoke([action] {
-            $anim.Stop(); $script:fi = 0; $Pope.Source = $frames[0]
-            if ($script:awaitingHide -and -not $script:lastCancelled) { $script:awaitingHide = $false; Hold 900 { Finish-Show } }
-        })
-    })
-}
 function Speak-Quote {
-    Init-Syn
-    try { $script:syn.SpeakAsyncCancelAll(); [void]$script:syn.SpeakAsync($quotes[$script:qi].T) } catch { }
+    if (-not (Speak-Text $quotes[$script:qi].T)) {
+        if ($script:awaitingHide) { $script:awaitingHide = $false; Hold 300 { Finish-Show } }
+    }
 }
 # organy, a po ~2,7 s (na ostatnim akordzie) lektor czyta cytat
 $script:speakDelay = New-Object Windows.Threading.DispatcherTimer
@@ -214,14 +226,14 @@ $script:speakDelay.Interval = [TimeSpan]::FromMilliseconds(2700)
 $script:speakDelay.Add_Tick({ $script:speakDelay.Stop(); Speak-Quote })
 function Organ-AndSpeak {
     $script:speakDelay.Stop()
-    if ($script:syn) { $script:syn.SpeakAsyncCancelAll() }
+    try { $script:ttsPlayer.Stop(); $script:ttsPlayer.Close() } catch { }
     try { $script:organ.Stop(); $script:organ.Play() } catch { }
     $script:speakDelay.Start()
 }
 function Stop-All {
     $script:speakDelay.Stop()
     try { $script:organ.Stop() } catch { }
-    if ($script:syn) { $script:syn.SpeakAsyncCancelAll() }
+    try { $script:ttsPlayer.Stop(); $script:ttsPlayer.Close() } catch { }
 }
 
 # --- co 30 min: humorystyczny raport o zużyciu RAM i CPU ---
@@ -261,10 +273,11 @@ function Get-SysJoke([int]$cpu, [int]$ram) {
     '{0} {1} {2}' -f $cpuLine[$rnd2.Next($cpuLine.Count)], $ramLine[$rnd2.Next($ramLine.Count)], $end[$rnd2.Next($end.Count)]
 }
 function Speak-SysStatus {
-    Init-Syn
     $cpu = [int][math]::Round($script:cpuNow)
     $ram = [int][PPJ]::MemLoad()
-    try { $script:syn.SpeakAsyncCancelAll(); [void]$script:syn.SpeakAsync((Get-SysJoke $cpu $ram)) } catch { }
+    if (-not (Speak-Text (Get-SysJoke $cpu $ram))) {
+        if ($script:awaitingHide) { $script:awaitingHide = $false; Hold 300 { Finish-Show } }
+    }
 }
 # (harmonogram pokazów zdefiniowany po bloku animacji)
 
@@ -344,8 +357,8 @@ function Run-Show([string]$kind) {
     Slide-In {
         switch ($script:pendingKind) {
             'peek'   { Hold 2500 { Finish-Show } }   # bez animacji: wyjedź, poczekaj, zjedź
-            'quote'  { $script:awaitingHide = $true; Organ-AndSpeak;  Hold 25000 { Finish-Show } }
-            'report' { $script:awaitingHide = $true; Speak-SysStatus; Hold 25000 { Finish-Show } }
+            'quote'  { $script:awaitingHide = $true; Organ-AndSpeak;  Hold 60000 { Finish-Show } }
+            'report' { $script:awaitingHide = $true; Speak-SysStatus; Hold 60000 { Finish-Show } }
         }
     }
 }
@@ -400,5 +413,5 @@ $win.Add_Loaded({
 
 $clock.Start(); $script:sysTimer.Start(); $script:peekTimer.Start()
 [void]$win.ShowDialog()
-if ($script:syn) { $script:syn.Dispose() }
+try { $script:ttsPlayer.Close() } catch { }
 $mtx.ReleaseMutex()

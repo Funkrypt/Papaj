@@ -20,8 +20,9 @@ Nie wymaga gita. Plik `organy.wav` generuje się sam przy pierwszym starcie.
 - **Co 30 minut, na zmianę**:
   - **cytat** — wysuwa się z dymkiem, gra organy, lektor czyta cytat, po czym się chowa;
   - **raport RAM/CPU** — wysuwa się i humorystycznie czyta aktualne zużycie zasobów.
-- Głos dobierany automatycznie: Microsoft Paulina → dowolny polski → pierwszy dostępny
-  (działa też na komputerze bez polskiego pakietu językowego).
+- Lektor: **OneCore TTS** (widzi nowoczesne głosy Windows). Preferuje polski głos
+  (Paulina/Adam); jeśli systemu brak polskiego głosu, **instalator doinstaluje go**
+  automatycznie, a gdyby się nie udało — gadżet użyje głosu domyślnego.
 - Klik na widocznego papieża = schowaj; prawy przycisk (gdy widoczny) = menu.
 
 ## Pliki
