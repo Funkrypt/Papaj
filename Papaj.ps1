@@ -18,6 +18,8 @@ Add-Type @"
 using System; using System.Runtime.InteropServices;
 public static class PPJ {
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint f);
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr h, int i);
+    [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr h, int i, int v);
     [DllImport("kernel32.dll")] static extern bool GetSystemTimes(out long idle, out long kernel, out long user);
     [StructLayout(LayoutKind.Sequential)]
     public class MEMSTAT { public uint len = 64; public uint load; public ulong totPhys, availPhys, totPage, availPage, totVirt, availVirt, availExt; }
@@ -127,7 +129,7 @@ $oq = [string][char]0x201E; $cq = [string][char]0x201D
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ShowInTaskbar="False" ResizeMode="NoResize" SizeToContent="Height" Width="330"
         Title="Papaj" FontFamily="Segoe UI Variable Text, Segoe UI">
-  <StackPanel>
+  <StackPanel x:Name="Root">
     <Grid x:Name="Bubble" Margin="6,0,6,0">
       <Border CornerRadius="22" Margin="0,2,0,0" Background="#40000000">
         <Border.Effect><BlurEffect Radius="14"/></Border.Effect>
@@ -153,6 +155,7 @@ $Pope   = $win.FindName('Pope')
 $QText  = $win.FindName('QText')
 $QSrc   = $win.FindName('QSrc')
 $Bubble = $win.FindName('Bubble')
+$Root   = $win.FindName('Root')
 
 function Show-Quote([int]$idx) {
     $q = $quotes[$idx]
@@ -171,18 +174,39 @@ function Next-Quote {
 # --- mowa (ten sam głos co w gadżecie Tychy) ---
 # papież rusza się TYLKO gdy mówi: start mowy -> animacja, koniec -> bezruch (klatka 0)
 $script:syn = $null
+$script:hasVoice = $false
+# Dobór głosu odporny na brak polskiego: Paulina -> dowolny polski -> pierwszy dostępny
+function Select-BestVoice($syn) {
+    try {
+        $voices = @($syn.GetInstalledVoices() | Where-Object { $_.Enabled } | ForEach-Object { $_.VoiceInfo })
+        if ($voices.Count -eq 0) { return $false }
+        $pick = $voices | Where-Object { $_.Name -eq 'Microsoft Paulina Desktop' } | Select-Object -First 1
+        if (-not $pick) { $pick = $voices | Where-Object { $_.Name -match 'Paulina' } | Select-Object -First 1 }
+        if (-not $pick) { $pick = $voices | Where-Object { $_.Culture -and $_.Culture.TwoLetterISOLanguageName -eq 'pl' } | Select-Object -First 1 }
+        if (-not $pick) { $pick = $voices[0] }
+        $syn.SelectVoice($pick.Name)
+        return $true
+    } catch { return $false }
+}
 function Init-Syn {
     if ($script:syn) { return }
     $script:syn = New-Object System.Speech.Synthesis.SpeechSynthesizer
-    try { $script:syn.SelectVoice('Microsoft Paulina Desktop') } catch { }
-    $script:syn.Rate = -1
+    $script:hasVoice = Select-BestVoice $script:syn
+    try { $script:syn.Rate = -1 } catch { }
     $script:syn.add_SpeakStarted({ $win.Dispatcher.Invoke([action] { $anim.Start() }) })
-    $script:syn.add_SpeakCompleted({ $win.Dispatcher.Invoke([action] { $anim.Stop(); $script:fi = 0; $Pope.Source = $frames[0] }) })
+    $script:syn.add_SpeakCompleted({
+        param($s, $e)
+        $c = $false; try { $c = [bool]$e.Cancelled } catch { }
+        $script:lastCancelled = $c
+        $win.Dispatcher.Invoke([action] {
+            $anim.Stop(); $script:fi = 0; $Pope.Source = $frames[0]
+            if ($script:awaitingHide -and -not $script:lastCancelled) { $script:awaitingHide = $false; Hold 900 { Finish-Show } }
+        })
+    })
 }
 function Speak-Quote {
     Init-Syn
-    $script:syn.SpeakAsyncCancelAll()
-    [void]$script:syn.SpeakAsync($quotes[$script:qi].T)
+    try { $script:syn.SpeakAsyncCancelAll(); [void]$script:syn.SpeakAsync($quotes[$script:qi].T) } catch { }
 }
 # organy, a po ~2,7 s (na ostatnim akordzie) lektor czyta cytat
 $script:speakDelay = New-Object Windows.Threading.DispatcherTimer
@@ -240,12 +264,9 @@ function Speak-SysStatus {
     Init-Syn
     $cpu = [int][math]::Round($script:cpuNow)
     $ram = [int][PPJ]::MemLoad()
-    $script:syn.SpeakAsyncCancelAll()
-    [void]$script:syn.SpeakAsync((Get-SysJoke $cpu $ram))
+    try { $script:syn.SpeakAsyncCancelAll(); [void]$script:syn.SpeakAsync((Get-SysJoke $cpu $ram)) } catch { }
 }
-$script:sysTimer = New-Object Windows.Threading.DispatcherTimer
-$script:sysTimer.Interval = [TimeSpan]::FromMinutes(30)
-$script:sysTimer.Add_Tick({ Speak-SysStatus })
+# (harmonogram pokazów zdefiniowany po bloku animacji)
 
 # --- animacja ---
 $script:fi = 0
@@ -258,14 +279,93 @@ $anim.Add_Tick({
     $anim.Interval = [TimeSpan]::FromMilliseconds($delays[$script:fi])
 })
 
-$script:since = 0; $script:tick = 0
+# ================= TŁO: wysuwanie/chowanie + harmonogram =================
+# Domyślnie ukryty. Peek co 10 min (bez dźwięku). Co 30 min na zmianę: cytat <-> raport.
+$script:busy = $false          # trwa pokaz/peek
+$script:sliding = $false       # trwa animacja chowania
+$script:awaitingHide = $false  # czekamy na koniec mowy, by schować
+$script:cycle = 0              # parzysty -> cytat, nieparzysty -> raport
+$script:tt = New-Object Windows.Media.TranslateTransform
+$Root.RenderTransform = $script:tt
+
+function Place-Window {
+    $wa = [Windows.SystemParameters]::WorkArea
+    $win.UpdateLayout()
+    $win.Left = $wa.Right - $win.ActualWidth
+    $win.Top  = $wa.Bottom - $win.ActualHeight
+    $h = (New-Object Windows.Interop.WindowInteropHelper $win).Handle
+    if ($h -ne [IntPtr]::Zero) { [void][PPJ]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, 0x0013) }  # HWND_TOPMOST
+}
+function Hold([int]$ms, [scriptblock]$cb) {
+    $t = New-Object Windows.Threading.DispatcherTimer
+    $t.Interval = [TimeSpan]::FromMilliseconds($ms)
+    $t.Tag = $cb
+    $t.Add_Tick({ $args[0].Stop(); & $args[0].Tag })
+    $t.Start()
+}
+function Animate-Y([double]$to, [int]$ms, [scriptblock]$done) {
+    $a = New-Object Windows.Media.Animation.DoubleAnimation($to, [TimeSpan]::FromMilliseconds($ms))
+    $a.AccelerationRatio = 0.4; $a.DecelerationRatio = 0.4
+    if ($done) { $a.Add_Completed($done) }
+    $script:tt.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $a)
+}
+function Set-ClickThrough([bool]$on) {
+    $h = (New-Object Windows.Interop.WindowInteropHelper $win).Handle
+    if ($h -eq [IntPtr]::Zero) { return }
+    $GWL = -20; $TRANSP = 0x20
+    $ex = [PPJ]::GetWindowLong($h, $GWL)
+    if ($on) { $ex = $ex -bor $TRANSP } else { $ex = $ex -band (-bnot $TRANSP) }
+    [void][PPJ]::SetWindowLong($h, $GWL, $ex)
+}
+function Hide-Now {
+    $script:tt.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $null)
+    $script:tt.Y = [math]::Max(1, $win.ActualHeight)
+    Set-ClickThrough $true
+}
+function Finish-Show {
+    if (-not $script:busy -or $script:sliding) { return }
+    $script:sliding = $true
+    $script:awaitingHide = $false
+    try { $script:organ.Stop() } catch { }
+    Animate-Y ([math]::Max(1, $win.ActualHeight)) 420 { Hide-Now; $script:busy = $false; $script:sliding = $false }
+}
+function Slide-In([scriptblock]$done) {
+    Place-Window
+    $script:tt.BeginAnimation([Windows.Media.TranslateTransform]::YProperty, $null)
+    $script:tt.Y = $win.ActualHeight
+    Set-ClickThrough $false
+    Place-Window
+    Animate-Y 0 420 $done
+}
+function Run-Show([string]$kind) {
+    if ($script:busy) { return }
+    $script:busy = $true; $script:sliding = $false; $script:pendingKind = $kind
+    if ($kind -eq 'quote') { $Bubble.Visibility = 'Visible'; Next-Quote } else { $Bubble.Visibility = 'Collapsed' }
+    Slide-In {
+        switch ($script:pendingKind) {
+            'peek'   { $anim.Start(); Hold 2500 { $anim.Stop(); $script:fi = 0; $Pope.Source = $frames[0]; Finish-Show } }
+            'quote'  { $script:awaitingHide = $true; Organ-AndSpeak;  Hold 25000 { Finish-Show } }
+            'report' { $script:awaitingHide = $true; Speak-SysStatus; Hold 25000 { Finish-Show } }
+        }
+    }
+}
+
+$script:sysTimer = New-Object Windows.Threading.DispatcherTimer
+$script:sysTimer.Interval = [TimeSpan]::FromMinutes(30)
+$script:sysTimer.Add_Tick({
+    if ($script:cycle % 2 -eq 0) { Run-Show 'quote' } else { Run-Show 'report' }
+    $script:cycle++
+})
+$script:peekTimer = New-Object Windows.Threading.DispatcherTimer
+$script:peekTimer.Interval = [TimeSpan]::FromMinutes(10)
+$script:peekTimer.Add_Tick({ Run-Show 'peek' })
+
+$script:tick = 0
 $clock = New-Object Windows.Threading.DispatcherTimer
 $clock.Interval = [TimeSpan]::FromSeconds(1)
 $clock.Add_Tick({
-    $script:since++; $script:tick++
-    $script:cpuNow = [PPJ]::Cpu()
-    if ($script:tick % 5 -eq 0) { Pin-Window }   # utrzymaj w rogu i na wierzchu
-    if ($script:since -ge $Co) { Next-Quote }
+    $script:tick++
+    $script:cpuNow = [PPJ]::Cpu()   # próbkowanie CPU do raportu
     if ($Snapshot -and $script:tick -eq 3) {
         $rtb = New-Object Windows.Media.Imaging.RenderTargetBitmap([int]$win.ActualWidth, [int]$win.ActualHeight, 96, 96, 'Pbgra32')
         $rtb.Render($win.Content)
@@ -276,34 +376,29 @@ $clock.Add_Tick({
     }
 })
 
-# --- menu ---
+# --- menu (dostępne, gdy papież jest widoczny: podczas peeku/pokazu) ---
 $menu = New-Object Windows.Controls.ContextMenu
 function Add-Item($txt, $sb) { $mi = New-Object Windows.Controls.MenuItem; $mi.Header = $txt; $mi.Add_Click($sb); [void]$menu.Items.Add($mi) }
-Add-Item 'Przeczytaj cytat'  { Organ-AndSpeak }
-Add-Item 'Następny cytat (bez dźwięku)' { Stop-All; Next-Quote }
-Add-Item 'Zatrzymaj czytanie' { Stop-All }
-Add-Item 'Raport RAM i CPU (na głos)' { Speak-SysStatus }
+Add-Item 'Pokaż cytat teraz'          { Run-Show 'quote' }
+Add-Item 'Raport RAM i CPU (na głos)' { Run-Show 'report' }
+Add-Item 'Schowaj'                    { Stop-All; Finish-Show }
 [void]$menu.Items.Add((New-Object Windows.Controls.Separator))
-Add-Item 'Zamknij'           { $win.Close() }
+Add-Item 'Zamknij'                    { $win.Close() }
 $win.ContextMenu = $menu
-$win.Add_MouseLeftButtonUp({ Next-Quote; Organ-AndSpeak })
+# klik na widocznego papieża = schowaj (i zatrzymaj mowę)
+$win.Add_MouseLeftButtonUp({ Stop-All; Finish-Show })
 
-# na stałe w PRAWYM DOLNYM rogu, zawsze na wierzchu (nie znika po kliknięciu)
+# start UKRYTY (w tle); pokazy sterują timery
 $win.Topmost = $true
-function Pin-Window {
-    $wa = [Windows.SystemParameters]::WorkArea
-    $win.Left = $wa.Right - $win.ActualWidth
-    $win.Top  = $wa.Bottom - $win.ActualHeight
-    $h = (New-Object Windows.Interop.WindowInteropHelper $win).Handle
-    if ($h -ne [IntPtr]::Zero) { [void][PPJ]::SetWindowPos($h, [IntPtr](-1), 0, 0, 0, 0, 0x0013) }  # HWND_TOPMOST
-}
-$win.Add_Loaded({ Pin-Window })
-$win.Add_Activated({ Pin-Window })
-$win.Add_Deactivated({ Pin-Window })
-$win.Add_SizeChanged({ Pin-Window })
+$win.Add_Activated({ if (-not $script:busy) { Place-Window } })
+$win.Add_SizeChanged({ if (-not $script:busy) { Place-Window } })
+$win.Add_Loaded({
+    $Bubble.Visibility = 'Collapsed'
+    Place-Window
+    Hide-Now
+})
 
-Show-Quote $script:qi
-$clock.Start(); $script:sysTimer.Start()   # $anim startuje dopiero gdy papież mówi
+$clock.Start(); $script:sysTimer.Start(); $script:peekTimer.Start()
 [void]$win.ShowDialog()
 if ($script:syn) { $script:syn.Dispose() }
 $mtx.ReleaseMutex()
